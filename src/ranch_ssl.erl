@@ -99,9 +99,10 @@ listen(Opts) ->
 			{error, no_cert}
 	end.
 
+-ifdef(OTP_RELEASE).
 do_listen(Opts) ->
 	Opts2 = ranch:set_option_default(Opts, backlog, 1024),
-	Opts3 = ranch:set_option_default(Opts2, ciphers, unbroken_cipher_suites()),
+	Opts3 = Opts2,
 	Opts4 = ranch:set_option_default(Opts3, nodelay, true),
 	Opts5 = ranch:set_option_default(Opts4, send_timeout, 30000),
 	Opts6 = ranch:set_option_default(Opts5, send_timeout_close, true),
@@ -110,6 +111,19 @@ do_listen(Opts) ->
 	%% first argument.
 	ssl:listen(0, ranch:filter_options(Opts6, disallowed_listen_options(),
 		[binary, {active, false}, {packet, raw}, {reuseaddr, true}])).
+-else.
+do_listen(Opts) ->
+    Opts2 = ranch:set_option_default(Opts, backlog, 1024),
+    Opts3 = ranch:set_option_default(Opts2, ciphers, unbroken_cipher_suites()),
+    Opts4 = ranch:set_option_default(Opts3, nodelay, true),
+    Opts5 = ranch:set_option_default(Opts4, send_timeout, 30000),
+    Opts6 = ranch:set_option_default(Opts5, send_timeout_close, true),
+    %% We set the port to 0 because it is given in the Opts directly.
+    %% The port in the options takes precedence over the one in the
+    %% first argument.
+    ssl:listen(0, ranch:filter_options(Opts6, disallowed_listen_options(),
+        [binary, {active, false}, {packet, raw}, {reuseaddr, true}])).
+-endif.
 
 %% 'binary' and 'list' are disallowed but they are handled
 %% specifically as they do not have 2-tuple equivalents.
@@ -125,38 +139,82 @@ accept(LSocket, Timeout) ->
 
 -spec accept_ack(ssl:sslsocket(), timeout()) -> ok.
 accept_ack(CSocket, Timeout) ->
-	case ssl:ssl_accept(CSocket, Timeout) of
-		ok ->
-			ok;
-		%% Garbage was most likely sent to the socket, don't error out.
-		{error, {tls_alert, _}} ->
-			ok = close(CSocket),
-			exit(normal);
-		%% Socket most likely stopped responding, don't error out.
-		{error, Reason} when Reason =:= timeout; Reason =:= closed ->
-			ok = close(CSocket),
-			exit(normal);
-		{error, Reason} ->
-			ok = close(CSocket),
-			error(Reason)
-	end.
+	handshake(CSocket, Timeout).
+
+-ifdef(OTP_RELEASE).
+handshake(CSocket, Timeout) ->
+    case ssl:handshake(CSocket, Timeout) of
+        {ok, _} ->
+            ok;
+        %% Garbage was most likely sent to the socket, don't error out.
+        {error, {tls_alert, _}} ->
+            ok = close(CSocket),
+            exit(normal);
+        %% Socket most likely stopped responding, don't error out.
+        {error, Reason} when Reason =:= timeout; Reason =:= closed ->
+            ok = close(CSocket),
+            exit(normal);
+        {error, Reason} ->
+            ok = close(CSocket),
+            error(Reason)
+    end.
+-else.
+handshake(CSocket, Timeout) ->
+    case ssl:ssl_accept(CSocket, Timeout) of
+        ok ->
+            ok;
+        %% Garbage was most likely sent to the socket, don't error out.
+        {error, {tls_alert, _}} ->
+            ok = close(CSocket),
+            exit(normal);
+        %% Socket most likely stopped responding, don't error out.
+        {error, Reason} when Reason =:= timeout; Reason =:= closed ->
+            ok = close(CSocket),
+            exit(normal);
+        {error, Reason} ->
+            ok = close(CSocket),
+            error(Reason)
+    end.
+-endif.
 
 %% @todo Probably filter Opts?
 -spec connect(inet:ip_address() | inet:hostname(),
-	inet:port_number(), any())
-	-> {ok, inet:socket()} | {error, atom()}.
+    inet:port_number(), any())
+    -> {ok, inet:socket()} | {error, atom()}.
+-ifdef(OTP_RELEASE).
 connect(Host, Port, Opts) when is_integer(Port) ->
-	ssl:connect(Host, Port,
+    case ssl:connect(Host, Port, []) of
+        {ok, S} ->
+            ssl:setopts(S, Opts ++ [binary, {active, false}, {packet, raw}]),
+            {ok, S};
+        {error, _} = Error ->
+            Error
+    end.
+-else.
+connect(Host, Port, Opts) when is_integer(Port) ->
+    ssl:connect(Host, Port,
 		Opts ++ [binary, {active, false}, {packet, raw}]).
+-endif.
 
 %% @todo Probably filter Opts?
 -spec connect(inet:ip_address() | inet:hostname(),
-	inet:port_number(), any(), timeout())
-	-> {ok, inet:socket()} | {error, atom()}.
+    inet:port_number(), any(), timeout())
+    -> {ok, inet:socket()} | {error, atom()}.
+-ifdef(OTP_RELEASE).
 connect(Host, Port, Opts, Timeout) when is_integer(Port) ->
-	ssl:connect(Host, Port,
+    case ssl:connect(Host, Port, [], Timeout) of
+        {ok, S} ->
+            ssl:setopts(S, Opts ++ [binary, {active, false}, {packet, raw}]),
+            {ok, S};
+        {error, _} = Error ->
+            Error
+    end.
+-else.
+connect(Host, Port, Opts, Timeout) when is_integer(Port) ->
+    ssl:connect(Host, Port,
 		Opts ++ [binary, {active, false}, {packet, raw}],
-		Timeout).
+        Timeout).
+-endif.
 
 -spec recv(ssl:sslsocket(), non_neg_integer(), timeout())
 	-> {ok, any()} | {error, closed | atom()}.
@@ -224,6 +282,7 @@ close(Socket) ->
 %% agreement.  Depending on the ssl application version, this function
 %% returns a list of all cipher suites that are supported by default,
 %% minus the elliptic-curve ones.
+-ifndef(OTP_RELEASE).
 -spec unbroken_cipher_suites() -> [ssl:erl_cipher_suite()].
 unbroken_cipher_suites() ->
 	case proplists:get_value(ssl_app, ssl:versions()) of
@@ -234,3 +293,4 @@ unbroken_cipher_suites() ->
 		_ ->
 			ssl:cipher_suites()
 	end.
+-endif.
